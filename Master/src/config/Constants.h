@@ -37,6 +37,11 @@ constexpr uint32_t     CORRECTION_DELAY        = 180000UL;  // 3 menit
 constexpr unsigned long WATER_FILL_TIMEOUT  = 7200000UL; // 2 jam
 constexpr unsigned long NUTRIENT_TIMEOUT    = 900000UL;  // 15 menit
 
+// Auto-recovery: setelah WATER_TIMEOUT, tunggu delay ini lalu retry FILL_WATER
+// otomatis (tanpa perlu reset fisik). Jika tetap gagal, state ERROR persist
+// hingga remote reset diterima via MQTT.
+constexpr unsigned long WATER_TIMEOUT_AUTO_RECOVER_MS = 1800000UL; // 30 menit
+
 // Durasi pulsing per channel — hasil kalibrasi stabil 0.5L (FlowCalibrationTestData.h).
 // A lebih lemah, butuh ON lebih lama agar air naik ke sensor.
 constexpr unsigned long NUTRIENT_A_PULSE_ON_MS  = 3125UL;  // 3.125 detik ON

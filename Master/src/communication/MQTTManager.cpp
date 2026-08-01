@@ -272,6 +272,11 @@ void MQTTManager::handleMessage(const char* topic, const String& payload) {
         return;
     }
 
+    if (String(topic) == TOPIC_CMD_RESET) {
+        handleRemoteReset(payload);
+        return;
+    }
+
     // Config topics — parse JSON
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
@@ -591,6 +596,7 @@ void MQTTManager::connectMQTT() {
         mqttClient.subscribe(TOPIC_CFG_TIMER_IRRIG);
         mqttClient.subscribe(TOPIC_CFG_MIX_EXT);
         mqttClient.subscribe(TOPIC_CMD_SOIL_RESET);
+        mqttClient.subscribe(TOPIC_CMD_RESET);
 #else
         Serial.printf("t=%010lu | INFO  | MQTT     | mode=publish_only receive=disabled\n", millis());
 #endif
@@ -613,13 +619,17 @@ const char* MQTTManager::stateToString(FertigationState state) {
         case FertigationState::WAIT_DAILY_MIX:          return "WAIT_DAILY_MIX";
         case FertigationState::PREPARE_DAILY_MIX:       return "PREPARE_DAILY_MIX";
         case FertigationState::FILL_WATER:              return "FILL_WATER";
+        case FertigationState::PRE_MIX_A:               return "PRE_MIX_A";
         case FertigationState::ADD_NUTRIENT_A:          return "ADD_NUTRIENT_A";
         case FertigationState::MIX_A:                   return "MIX_A";
+        case FertigationState::PRE_MIX_B:               return "PRE_MIX_B";
         case FertigationState::ADD_NUTRIENT_B:          return "ADD_NUTRIENT_B";
         case FertigationState::MIX_B:                   return "MIX_B";
         case FertigationState::VALIDATE:                return "VALIDATE";
+        case FertigationState::PRE_MIX_CORRECTION:      return "PRE_MIX_CORRECTION";
         case FertigationState::CORRECT_PPM:             return "CORRECT_PPM";
         case FertigationState::CORRECTION_MIX:          return "CORRECTION_MIX";
+        case FertigationState::ESTIMATION_DOSE:         return "ESTIMATION_DOSE";
         case FertigationState::READY:                   return "READY";
         case FertigationState::PRE_IRRIGATION_MIX:      return "PRE_IRRIGATION_MIX";
         case FertigationState::PRE_IRRIGATION_VALIDATE: return "PRE_IRRIGATION_VALIDATE";
@@ -697,6 +707,46 @@ void MQTTManager::handleConfigMixScheduleExt(const JsonDocument& doc) {
 
     configManager.setStirSchedule(stirEvHour, stirEvMin, stirDurSec * 1000UL);
     publishConfigAck("mix_schedule_ext", true);
+}
+
+// =========================================
+// handleRemoteReset() — restart ESP32 dari web
+// Matikan semua relay dulu (aman untuk aktuator), publish ACK, lalu ESP.restart().
+// Payload boleh apa pun; jika JSON valid dengan field "reason" akan diteruskan ke ACK.
+// =========================================
+void MQTTManager::handleRemoteReset(const String& payload) {
+    // Safety: pastikan tidak ada relay yang tertinggal aktif setelah restart trigger
+    relayManager.allOff();
+
+    // Coba parse JSON untuk ambil reason (opsional)
+    String reason = "manual";
+    JsonDocument doc;
+    if (deserializeJson(doc, payload) == DeserializationError::Ok
+        && doc["reason"].is<const char*>()) {
+        reason = String(doc["reason"].as<const char*>());
+    } else if (payload.length() > 0 && payload.length() < 64) {
+        reason = payload;
+    }
+
+    JsonDocument ack;
+    ack["device_id"] = MQTT_CLIENT_ID;
+    ack["status"]    = "restarting";
+    ack["reason"]    = reason;
+    ack["timestamp"] = millis();
+
+    char buf[192];
+    serializeJson(ack, buf);
+    mqttClient.publish(TOPIC_CMD_RESET_ACK, buf, false);
+    mqttClient.loop();  // flush ACK ke broker sebelum restart
+
+    Serial.printf(
+        "t=%010lu | WARN  | RESET    | remote_reset triggered reason=%s\n",
+        millis(),
+        reason.c_str()
+    );
+
+    delay(300);   // beri waktu ACK terkirim
+    ESP.restart();
 }
 
 // =========================================

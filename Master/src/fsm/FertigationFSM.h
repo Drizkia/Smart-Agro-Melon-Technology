@@ -262,6 +262,11 @@ private:
     int8_t _activeSlotIdx = -1;       // -1 = tidak ada slot aktif
     bool   _timerSlotRunning = false; // apakah sedang dalam window irigasi timer
 
+    // --- ERROR auto-recovery state ---
+    // Timestamp masuk ke state ERROR. Digunakan handleError() untuk
+    // menghitung durasi menunggu sebelum auto-recover (WATER_TIMEOUT saja).
+    unsigned long _errorEntryTime = 0;
+
     // --- Estimation mode (TDS sensor clip > 900 ppm) ---
     // Reset setiap PREPARE_DAILY_MIX (siklus harian baru).
     bool  _estimationActive  = false;

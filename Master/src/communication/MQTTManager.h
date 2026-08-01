@@ -47,6 +47,12 @@
 #define TOPIC_CFG_MIX_EXT       "greenhouse/config/mix_schedule_ext"
 #define TOPIC_CMD_SOIL_RESET    "greenhouse/soil/reset_mode"
 
+// Remote control — restart ESP32 dari web tanpa menyentuh perangkat fisik.
+// Payload bebas (misal "restart" atau JSON {"action":"restart"}). Terima pesan
+// apa pun di topic ini → ESP.restart() setelah publish ACK.
+#define TOPIC_CMD_RESET         "greenhouse/control/reset"
+#define TOPIC_CMD_RESET_ACK     "greenhouse/control/reset/ack"
+
 // =========================================
 // MQTT TOPICS — Telemetry (publish)
 // =========================================
@@ -58,7 +64,7 @@
 
 // MQTT sekarang dipakai publish-only. Input FSM/command diambil dari
 // Master/data/FSMInputData.h sampai inbound web siap dipakai lagi.
-#define MQTT_RECEIVE_ENABLED 0
+#define MQTT_RECEIVE_ENABLED 1
 
 // Jika 0, firmware tidak akan membuka captive portal/blocking WiFi saat boot.
 // FSM tetap jalan offline; MQTT publish dicoba hanya saat WiFi sudah terhubung.
@@ -111,6 +117,7 @@ private:
     void handleConfigTimerIrrigation(const JsonDocument& doc);
     void handleConfigMixScheduleExt(const JsonDocument& doc);
     void handleSoilResetMode(const String& payload);
+    void handleRemoteReset(const String& payload);
 
     // Static callback PubSubClient — gunakan pointer ke instance
     static void onMessage(const char* topic, byte* payload, unsigned int length);

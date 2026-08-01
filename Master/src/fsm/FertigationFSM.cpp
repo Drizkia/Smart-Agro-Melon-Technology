@@ -613,6 +613,19 @@ void FertigationFSM::handleWaitDailyMix() {
 }
 
 void FertigationFSM::handlePrepareDailyMix() {
+    // FIX BUG DAY-2 FILL_WATER_TIMEOUT:
+    // Matikan SEMUA relay & reset flag stale sebelum masuk FILL_WATER. Tanpa ini,
+    // bila daily-mix trigger jatuh saat timer irrigation slot masih aktif di READY,
+    // RELAY_SOLENOID_IRRIG + RELAY_PUMP_MIX tetap ON dan air justru dipompa keluar
+    // ke tanaman selama FILL_WATER — toren tidak pernah terisi → WATER_TIMEOUT.
+    relayManager.allOff();
+    _timerSlotRunning  = false;
+    _activeSlotIdx     = -1;
+    _fillTargetReached = false;
+    _stirring          = false;
+    _nutrientDraining  = false;
+    _tankLowBlocked    = false;
+
     // Reset flow meter dan mulai pengisian air otomatis di FILL_WATER.
     // prepareDailyRecipe() dipanggil setelah tangki penuh (di akhir handleFillWater()).
     nutrientAFlow.reset();
@@ -644,6 +657,15 @@ void FertigationFSM::handleFillWater() {
 
     if (!stateInitialized) {
         consumeRecovery();
+        // Safety: pastikan output irigasi TERTUTUP selama FILL_WATER supaya
+        // air yang masuk lewat WATER_INLET tidak sekaligus dipompa keluar via
+        // RELAY_PUMP_MIX + RELAY_SOLENOID_IRRIG (penyebab WATER_TIMEOUT day 2).
+        relayManager.off(RELAY_SOLENOID_IRRIG);
+        relayManager.off(RELAY_SOLENOID_A);
+        relayManager.off(RELAY_SOLENOID_B);
+        relayManager.off(RELAY_PUMP_A);
+        relayManager.off(RELAY_PUMP_B);
+
         lastTankVolume      = sensor.tankVolume;
         _fillStartVolume    = sensor.tankVolume;
         lastLevelChangeTime = millis();
@@ -1126,7 +1148,20 @@ void FertigationFSM::handleEstimationDose() {
 float FertigationFSM::getEffectivePPM() const {
     if (!_estimationActive) return sensor.ppm;
     if (sensor.tankVolume <= 0.0f) return sensor.ppm;
-    float dosedML = (_estimDosedA_L + _estimDosedB_L) * 1000.0f;
+
+    // Saat sedang ESTIMATION_DOSE: flow meter masih inkremental jadi pakai
+    // realtime sensor.flowA/B supaya PPM di web ikut naik smooth dari anchor
+    // ~900 menuju target (mis. 1400) — bukan diam di 900 lalu tiba-tiba lompat.
+    // Setelah dosing selesai, _estimDosed*_L sudah terisi (di-latch) dan
+    // flow meter tidak di-reset sampai siklus harian berikutnya jadi tetap valid.
+    float aL = _estimDosedA_L;
+    float bL = _estimDosedB_L;
+    if (state == FertigationState::ESTIMATION_DOSE) {
+        if (sensor.flowA > aL) aL = sensor.flowA;
+        if (sensor.flowB > bL) bL = sensor.flowB;
+    }
+
+    float dosedML = (aL + bL) * 1000.0f;
     return _estimAnchorPPM + (dosedML * PPM_PER_ML_PER_LITER_AB) / sensor.tankVolume;
 }
 
@@ -1216,6 +1251,35 @@ void FertigationFSM::handleIrrigation() {
         logStateAction("[FSM] Start Irrigation");
     }
 
+    // TIMER mode: berhenti saat slot RTC berakhir (bukan berdasarkan soil ADC)
+    if (soilHealthMonitor.getMode() == IrrigationMode::TIMER) {
+        uint8_t  hour    = rtcManager.getHour();
+        uint8_t  minute  = rtcManager.getMinute();
+        uint16_t nowMin  = static_cast<uint16_t>(hour) * 60U + minute;
+
+        bool slotStillActive = false;
+        uint8_t numSlots = configManager.getNumIrrigationSlots();
+        for (uint8_t i = 0; i < numSlots; i++) {
+            IrrigationSlot slot = configManager.getIrrigationSlot(i);
+            uint16_t startMin = static_cast<uint16_t>(slot.startHour) * 60U + slot.startMinute;
+            uint16_t endMin   = static_cast<uint16_t>(slot.endHour)   * 60U + slot.endMinute;
+            if (isMinuteInsideWindow(nowMin, startMin, endMin)) {
+                slotStillActive = true;
+                break;
+            }
+        }
+
+        if (!slotStillActive) {
+            stopIrrigationOutput();
+            _timerSlotRunning   = false;
+            _activeSlotIdx      = -1;
+            _irrigJustCompleted = true;
+            gotoReady();
+        }
+        return;
+    }
+
+    // HUMIDITY mode: berhenti saat tanah cukup lembab
     if (sensor.soilADC <= currentIrrigation.wetThreshold) {
         stopIrrigationOutput();
         _irrigJustCompleted = true; // Set flag for SoilHealthMonitor
@@ -1242,26 +1306,36 @@ void FertigationFSM::handleTimerIrrigation() {
     }
 
     if (activeSlot >= 0 && !_timerSlotRunning) {
+        // FIX: transisi ke IRRIGATION state supaya event muncul di log MQTT.
+        // handleIrrigation() akan otomatis handle TIMER mode (stop by slot end).
         irrigFlow.reset();
-        startIrrigationOutput();
         _timerSlotRunning = true;
         _activeSlotIdx = activeSlot;
+        changeState(FertigationState::IRRIGATION);
         return;
     }
 
-    if (activeSlot < 0 && _timerSlotRunning) {
-        stopIrrigationOutput();
-        _timerSlotRunning = false;
-        _activeSlotIdx = -1;
-        _irrigJustCompleted = true; // Pemicu evaluation pasca-watering pada SoilHealthMonitor
-    }
+    // NOTE: end-of-slot handling sekarang dilakukan di handleIrrigation()
+    // saat sudah di state IRRIGATION.
 }
 
 void FertigationFSM::handleError() {
     if (!stateInitialized) {
         relayManager.allOff();
         logError();
+        _errorEntryTime  = millis();
         stateInitialized = true;
+    }
+
+    // Auto-recover khusus WATER_TIMEOUT: setelah delay tertentu, coba lagi
+    // FILL_WATER (relay sudah OFF karena enterError() memanggil allOff() —
+    // ini juga membersihkan sisa SOLENOID_IRRIG yang mungkin bikin fill gagal).
+    // Untuk error lain (pH, sensor, dsb.) tetap butuh remote reset via MQTT.
+    if (currentError == ErrorCode::WATER_TIMEOUT &&
+        waitingRecovery &&
+        (millis() - _errorEntryTime) >= WATER_TIMEOUT_AUTO_RECOVER_MS) {
+        logStateAction("[FSM] Auto-recover dari WATER_TIMEOUT — retry FILL_WATER");
+        waitingRecovery = false;
     }
 
     if (waitingRecovery == false) {

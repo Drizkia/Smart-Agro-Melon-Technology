@@ -75,6 +75,9 @@ public:
     // Tidak boleh ada logic internal yang memanggil ini secara otomatis.
     void resetToHumidityMode();
 
+    // Set ke TIMER mode -- dipanggil dari perintah MQTT eksplisit.
+    void switchToTimerMode();
+
 private:
     // Evaluasi semua rule dan hitung health score.
     // Dipanggil setiap SOIL_HEALTH_EVAL_INTERVAL.
@@ -82,9 +85,6 @@ private:
 
     // Simpan mode ke NVS namespace "cfg_soil"
     void saveMode();
-
-    // Switch ke mode TIMER dan simpan ke NVS
-    void switchToTimerMode();
 
     // Tambahkan ADC ke ring buffer flatline
     void pushADCBuffer(uint16_t adc);

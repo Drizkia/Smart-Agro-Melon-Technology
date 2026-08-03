@@ -12,15 +12,29 @@ SoilHealthMonitor::SoilHealthMonitor(ESPNowManager& espNow, ConfigManager& confi
 }
 
 // =========================================
-// begin() -- load mode dari NVS
+// begin() -- load mode dari NVS (persisten across reboot)
+// FIX: sebelumnya selalu meng-override NVS dengan IRRIGATION_MODE_SOURCE
+// compile-time flag, jadi pilihan mode dari web (MQTT) hilang setiap boot.
+// Sekarang: NVS jadi source of truth. Compile-time flag hanya default
+// jika NVS masih kosong (first boot / setelah wipe).
 // =========================================
 void SoilHealthMonitor::begin() {
+    _prefs.begin(NS_SOIL, true);  // read-only
+    uint8_t storedMode = _prefs.getUChar("mode", 0xFF);  // 0xFF = sentinel "belum diset"
+    _prefs.end();
+
+    if (storedMode == static_cast<uint8_t>(IrrigationMode::HUMIDITY) ||
+        storedMode == static_cast<uint8_t>(IrrigationMode::TIMER)) {
+        _mode = static_cast<IrrigationMode>(storedMode);
+    } else {
+        // NVS masih kosong — pakai compile-time default lalu simpan
 #if IRRIGATION_MODE_SOURCE == 1
-    _mode = IrrigationMode::TIMER;
+        _mode = IrrigationMode::TIMER;
 #else
-    _mode = IrrigationMode::HUMIDITY;
+        _mode = IrrigationMode::HUMIDITY;
 #endif
-    saveMode();
+        saveMode();
+    }
 }
 
 // =========================================

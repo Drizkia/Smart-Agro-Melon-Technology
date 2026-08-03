@@ -247,6 +247,7 @@ private:
 
     // --- Safety guard state (checkMinimumWater Opsi A) ---
     bool          _tankLowBlocked     = false;   // flag irigasi diblokir karena tank < safety floor
+    bool          _fillTargetReached  = false;   // latch: target fill sudah tercapai di siklus ini
 
     // --- Need-refill alert state (FILL_WATER waiting for target) ---
     float         _refillDeficit         = 0.0f;    // kekurangan liter (untuk payload MQTT alert)
@@ -260,6 +261,11 @@ private:
     // Tracking slot jadwal yang sedang aktif
     int8_t _activeSlotIdx = -1;       // -1 = tidak ada slot aktif
     bool   _timerSlotRunning = false; // apakah sedang dalam window irigasi timer
+
+    // --- ERROR auto-recovery state ---
+    // Timestamp masuk ke state ERROR. Digunakan handleError() untuk
+    // menghitung durasi menunggu sebelum auto-recover (WATER_TIMEOUT saja).
+    unsigned long _errorEntryTime = 0;
 
     // --- Estimation mode (TDS sensor clip > 900 ppm) ---
     // Reset setiap PREPARE_DAILY_MIX (siklus harian baru).

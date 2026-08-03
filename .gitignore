@@ -8,6 +8,7 @@
 **/.vscode/c_cpp_properties.json
 **/.vscode/launch.json
 **/.vscode/ipch/
+.vscode/settings.json
 
 # Keep workspace recommendations if present
 !**/.vscode/extensions.json

@@ -246,8 +246,9 @@ private:
     unsigned long _stirStartMs        = 0;       // kapan stirrer dinyalakan
 
     // --- Safety guard state (checkMinimumWater Opsi A) ---
-    bool          _tankLowBlocked     = false;   // flag irigasi diblokir karena tank < safety floor
-    bool          _fillTargetReached  = false;   // latch: target fill sudah tercapai di siklus ini
+    bool          _tankLowBlocked        = false;   // flag irigasi diblokir karena tank < safety floor
+    bool          _fillTargetReached     = false;   // latch: target fill sudah tercapai di siklus ini
+    unsigned long _fillTargetReachedMs    = 0;       // timestamp saat target fill tercapai
 
     // --- Need-refill alert state (FILL_WATER waiting for target) ---
     float         _refillDeficit         = 0.0f;    // kekurangan liter (untuk payload MQTT alert)

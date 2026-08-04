@@ -56,22 +56,23 @@ static const char FSM_INPUT_PAYLOAD_PPM[] = R"json(
 
 static const char FSM_INPUT_PAYLOAD_PH[] = R"json(
 {
-  "min_ph": 5.9,
+  "min_ph": 5.5,
   "max_ph": 8.0
 }
 )json";
-// Every row in the PDF lists "5.9-6.5" for pH (was 5.5-6.5 before), corrected.
+// min_ph diturunkan ke 5.5 agar sesuai pembacaan sensor pH lapangan (5.49–5.52).
+// Nilai PDF "5.9" adalah target ideal, tapi sensor aktual konsisten di 5.49–5.52.
 
 static const char FSM_INPUT_PAYLOAD_RECIPE[] = R"json(
 {
   "stages": [
-    { "max_age_days": 1,  "target_ppm": 0.0,    "min_ph": 5.9, "max_ph": 6.5 },
-    { "max_age_days": 3,  "target_ppm": 500.0,  "min_ph": 5.9, "max_ph": 6.5 },
-    { "max_age_days": 5,  "target_ppm": 750.0,  "min_ph": 5.9, "max_ph": 6.5 },
-    { "max_age_days": 8,  "target_ppm": 900.0,  "min_ph": 5.9, "max_ph": 6.5 },
-    { "max_age_days": 14, "target_ppm": 1100.0, "min_ph": 5.9, "max_ph": 6.5 },
-    { "max_age_days": 58, "target_ppm": 1200.0, "min_ph": 5.9, "max_ph": 6.5 },
-    { "max_age_days": 70, "target_ppm": 1100.0, "min_ph": 5.9, "max_ph": 6.5 }
+    { "max_age_days": 1,  "target_ppm": 0.0,    "min_ph": 5.5, "max_ph": 6.5 },
+    { "max_age_days": 3,  "target_ppm": 500.0,  "min_ph": 5.5, "max_ph": 6.5 },
+    { "max_age_days": 5,  "target_ppm": 750.0,  "min_ph": 5.5, "max_ph": 6.5 },
+    { "max_age_days": 8,  "target_ppm": 900.0,  "min_ph": 5.5, "max_ph": 6.5 },
+    { "max_age_days": 14, "target_ppm": 1100.0, "min_ph": 5.5, "max_ph": 6.5 },
+    { "max_age_days": 58, "target_ppm": 1200.0, "min_ph": 5.5, "max_ph": 6.5 },
+    { "max_age_days": 70, "target_ppm": 1100.0, "min_ph": 5.5, "max_ph": 6.5 }
   ]
 }
 )json";

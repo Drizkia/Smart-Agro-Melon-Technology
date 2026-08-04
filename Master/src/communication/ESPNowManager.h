@@ -27,11 +27,19 @@ public:
     void clearFlag();
 
 private:
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    static void onDataRecv(
+        const esp_now_recv_info_t *esp_now_info,
+        const uint8_t *incomingData,
+        int len
+    );
+#else
     static void onDataRecv(
         const uint8_t *mac,
         const uint8_t *incomingData,
         int len
     );
+#endif
 
     static SoilData receivedData;
 

@@ -85,7 +85,10 @@ void FertigationFSM::begin() {
         logStateAction("[FSM] Belum ada konfigurasi dari web — menunggu di IDLE");
         changeState(FertigationState::IDLE);
     } else {
-#if SKIP_DAILY_SCHEDULE || ENABLE_FULL_SYSTEM_TEST
+#if ENABLE_IRRIGATION_TEST
+        logStateAction("[FSM][TEST] IRRIGATION_TEST: skip mix, langsung PRE_IRRIGATION_MIX");
+        startIrrigationOutput();
+#elif SKIP_DAILY_SCHEDULE || ENABLE_FULL_SYSTEM_TEST
         changeState(FertigationState::PREPARE_DAILY_MIX);
 #else
         changeState(FertigationState::WAIT_DAILY_MIX);
@@ -665,13 +668,14 @@ void FertigationFSM::handleFillWater() {
         relayManager.off(RELAY_SOLENOID_B);
         relayManager.off(RELAY_PUMP_A);
         relayManager.off(RELAY_PUMP_B);
+        relayManager.off(RELAY_PUMP_MIX);
+        relayManager.off(RELAY_MIXER_STIR);
 
         lastTankVolume      = sensor.tankVolume;
         _fillStartVolume    = sensor.tankVolume;
         lastLevelChangeTime = millis();
         _lastRefillAlertMs  = 0;  // paksa kirim alert segera
         _fillTargetReached  = false;
-        startFillStirrer();
         if (sensor.tankVolume < configManager.getTargetFillVolume()) {
             openWaterInlet();
         } else {
@@ -699,10 +703,13 @@ void FertigationFSM::handleFillWater() {
     // solenoid ditutup dan sistem menunggu level stabil sebentar sebelum lanjut nutrisi.
     if (sensor.tankVolume >= configManager.getTargetFillVolume() ||
         sensor.tankVolume > configManager.getTankCapacityLiter()) {
-        _fillTargetReached = true;
+        if (!_fillTargetReached) {
+            _fillTargetReached   = true;
+            _fillTargetReachedMs = millis();
+        }
         closeWaterInlet();
-        if (millis() - lastLevelChangeTime >= WATER_LEVEL_STABLE_TIMEOUT) {
-            stopFillStirrer();
+        if (millis() - lastLevelChangeTime >= WATER_LEVEL_STABLE_TIMEOUT ||
+            millis() - _fillTargetReachedMs >= WATER_LEVEL_STABLE_TIMEOUT) {
             prepareDailyRecipe();
             if (isPPMAcceptableForUse()) {
                 relayManager.off(RELAY_PUMP_A);

@@ -5,7 +5,7 @@
 #include "TestFlags.h"
 
 // Dosis per injeksi koreksi PPM nutrisi A/B.
-constexpr float CORRECTION_DOSE = 0.05f; // 50mL
+constexpr float CORRECTION_DOSE = 0.5f; // 500ml
 
 // Batas atas pembacaan sensor TDS secara fisik (~900 ppm).
 // Di atas ini sensor clip — sistem beralih ke mode estimasi.
@@ -54,7 +54,7 @@ constexpr unsigned long NUTRIENT_DRAIN_DELAY_MS = 60000UL; // 1 menit
 constexpr uint32_t PRE_IRRIGATION_MIX_TIME = 60000UL; // 1 menit
 
 // FILL_WATER guards.
-constexpr float          WATER_LEVEL_NOISE_THRESHOLD  = 0.1f;     // liter
+constexpr float          WATER_LEVEL_NOISE_THRESHOLD  = 5.0f;     // liter (ambang noise ultrasonik tangki 700L)
 constexpr unsigned long  WATER_LEVEL_STABLE_TIMEOUT   = 3000UL;   // 3 detik
 constexpr float          TANK_SAFETY_FLOOR_LITER       = 5.0f;
 constexpr unsigned long  NEED_REFILL_ALERT_INTERVAL_MS = 1000UL;  // 1 detik

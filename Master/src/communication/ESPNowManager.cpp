@@ -13,6 +13,8 @@ uint8_t                ESPNowManager::_lastSenderMac[6] = {0};
 
 bool ESPNowManager::begin() {
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     if (WiFi.status() != WL_CONNECTED) {
         WiFi.disconnect();
@@ -29,11 +31,20 @@ bool ESPNowManager::begin() {
     return true;
 }
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+void ESPNowManager::onDataRecv(
+    const esp_now_recv_info_t *esp_now_info,
+    const uint8_t *incomingData,
+    int len
+) {
+    const uint8_t *mac = esp_now_info ? esp_now_info->src_addr : nullptr;
+#else
 void ESPNowManager::onDataRecv(
     const uint8_t *mac,
     const uint8_t *incomingData,
     int len
 ) {
+#endif
     _lastPacketSize = len;
 
     // Reject packets from incompatible Sleeve firmware.
@@ -47,7 +58,9 @@ void ESPNowManager::onDataRecv(
         sizeof(receivedData)
     );
 
-    memcpy(_lastSenderMac, mac, 6);
+    if (mac) {
+        memcpy(_lastSenderMac, mac, 6);
+    }
     _lastReceiveMs = millis();
     _packetCount++;
     newData = true;

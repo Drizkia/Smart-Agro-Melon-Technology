@@ -7,7 +7,7 @@
 #include "../communication/SoilData.h"
 
 static const uint8_t ESPNOW_TARGET_MAC[6] = {
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF   // Broadcast: Master menerima paket dari sender mana pun di channel yang sama.
+    0xAC, 0xA7, 0x04, 0x13, 0x6E, 0x8C   // Target Unicast MAC Master Node
 };
 
 class ESPNowSender {

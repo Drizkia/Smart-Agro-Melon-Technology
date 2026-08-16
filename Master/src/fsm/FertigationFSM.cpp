@@ -1,14 +1,7 @@
 #include "FertigationFSM.h"
 #include "../config/Constants.h"
 #include "../config/SystemConfig.h"
-
-static bool isMinuteInsideWindow(uint16_t nowMinute, uint16_t startMinute, uint16_t endMinute) {
-    if (startMinute == endMinute) return false;
-    if (startMinute < endMinute) {
-        return nowMinute >= startMinute && nowMinute < endMinute;
-    }
-    return nowMinute >= startMinute || nowMinute < endMinute;
-}
+#include "../utils/TimeWindow.h"
 
 FertigationFSM::FertigationFSM(
     SensorManager&     sensors,

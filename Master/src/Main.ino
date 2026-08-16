@@ -19,6 +19,13 @@
 #include "actuators/RelayManager.h"
 
 #include "communication/MQTTManager.h"
+#include "communication/RelayOnlyMQTT.h"
+
+#include "scheduler/TimerIrrigationScheduler.h"
+
+// Sudah ikut ter-include lewat FSMInputData.h, ditulis eksplisit agar jalur
+// relay-only tidak bergantung pada include tak langsung.
+#include "TimerIrrigationData.h"
 
 #include "recipe/RecipeManager.h"
 #include "recipe/IrrigationRecipe.h"
@@ -39,6 +46,20 @@
 #include "communication/ESPNowManager.h"
 
 #include "utils/RecoveryManager.h"
+
+#if RELAY_ONLY_MODE
+
+// Mode relay-only: hanya lima objek. Tidak ada sensor, ESP-NOW, recovery,
+// recipe, maupun FSM yang dibuat — jadi tidak ada satu pun yang di-init.
+// Urutan penting: scheduler butuh ketiga objek di atasnya, mqtt butuh scheduler.
+RelayManager  relay;
+RTCManager    rtcManager;
+ConfigManager configManager;
+
+TimerIrrigationScheduler scheduler(rtcManager, relay, configManager);
+RelayOnlyMQTT            mqtt(relay, rtcManager, scheduler);
+
+#else
 
 RelayManager relay;
 
@@ -106,8 +127,28 @@ FertigationFSM fsm(
 
 MQTTManager mqtt(relay, configManager, rtcManager, waterLevel, soilHealth, fsm);
 
+#endif  // RELAY_ONLY_MODE
+
 static constexpr unsigned long STATUS_LOG_INTERVAL_MS = 5000UL;
 static const char* FIRMWARE_BUILD_ID = __DATE__ " " __TIME__;
+
+// --- Log helper: dipakai kedua jalur (relay-only maupun sistem penuh),
+// jadi definisinya harus di luar percabangan #if RELAY_ONLY_MODE di bawah.
+void logLine(const char* level, const char* component, const char* message) {
+    Serial.printf(
+        "t=%010lu | %-5s | %-8s | %s\n",
+        millis(),
+        level,
+        component,
+        message
+    );
+}
+
+void logBootStep(const char* component, const char* status) {
+    char message[96];
+    snprintf(message, sizeof(message), "init=%s", status);
+    logLine("INFO", component, message);
+}
 
 void clearPreferencesNamespace(const char* ns) {
     Preferences prefs;
@@ -146,6 +187,101 @@ void resetAppNVSOnFirmwareChange() {
 
     logLine("INFO", "NVS", "app_config=reset reason=new_firmware");
 }
+
+#if RELAY_ONLY_MODE
+
+// =========================================================================
+// MODE RELAY-ONLY
+// FSM dan seluruh sensor tidak dijalankan. Web hanya bisa on/off relay lewat
+// MQTT; satu-satunya yang otomatis adalah penjadwal penyiraman berbasis slot
+// di Master/data/TimerIrrigationData.h.
+// =========================================================================
+
+void logRelayOnlyStatus() {
+    char activeRelays[32];
+    snprintf(activeRelays, sizeof(activeRelays), "[");
+    bool first = true;
+    for (uint8_t i = 1; i <= 8; i++) {
+        if (!relay.isOn(static_cast<RelayChannel>(i))) continue;
+        size_t used = strlen(activeRelays);
+        snprintf(activeRelays + used, sizeof(activeRelays) - used, "%s%u", first ? "" : ",", i);
+        first = false;
+    }
+    strncat(activeRelays, "]", sizeof(activeRelays) - strlen(activeRelays) - 1);
+
+    Serial.printf(
+        "t=%010lu | INFO  | STATUS   | mode=RELAY_ONLY sched=%s slot=%d relays=%s\n",
+        millis(),
+        scheduler.stateName(),
+        scheduler.getActiveSlotIndex(),
+        activeRelays
+    );
+
+    Serial.printf(
+        "t=%010lu | INFO  | RTC      | ok=%s time=%04u-%02u-%02u %02u:%02u\n",
+        millis(),
+        rtcManager.isOk() ? "YES" : "NO",
+        rtcManager.getYear(), rtcManager.getMonth(), rtcManager.getDay(),
+        rtcManager.getHour(), rtcManager.getMinute()
+    );
+
+    Serial.printf(
+        "t=%010lu | INFO  | NETWORK  | wifi=%s mqtt=%s ip=%s\n",
+        millis(),
+        WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+        mqtt.isConnected() ? "UP" : "DOWN",
+        WiFi.localIP().toString().c_str()
+    );
+}
+
+void setup() {
+    Serial.begin(115200);
+    // Tunggu USB CDC siap (wajib untuk ESP32-S3 USB CDC)
+    unsigned long t = millis();
+    while (!Serial && (millis() - t) < 3000) delay(10);
+    logLine("INFO", "BOOT", "serial=ready mode=RELAY_ONLY");
+
+    resetAppNVSOnFirmwareChange();
+
+    // Hanya slot jadwal yang dimuat. loadHardcodedFSMInputData() sengaja TIDAK
+    // dipanggil: resep ppm, pH, volume tangki, dan jadwal mixing tidak relevan
+    // tanpa FSM.
+    configManager.begin();
+    loadTimerIrrigationData(configManager);
+    logBootStep("CONFIG", "timer_slots_loaded");
+
+    relay.begin();   // sudah memanggil allOff()
+    logBootStep("RELAY", "ready");
+
+    Wire.begin(
+        I2C_SDA_PIN,
+        I2C_SCL_PIN
+    );
+    logBootStep("I2C", "ready");
+
+    rtcManager.begin();
+    logBootStep("RTC", rtcManager.isOk() ? "ready" : "error");
+
+    scheduler.begin();
+
+    mqtt.begin();
+    logBootStep("MQTT", mqtt.isConnected() ? "connected" : "disconnected");
+
+    logLine("INFO", "BOOT", "system=ready mode=RELAY_ONLY fsm=disabled sensors=disabled");
+}
+
+void loop() {
+    scheduler.update();
+    mqtt.update();
+
+    static unsigned long lastStatusLog = 0;
+    if (millis() - lastStatusLog >= STATUS_LOG_INTERVAL_MS) {
+        lastStatusLog = millis();
+        logRelayOnlyStatus();
+    }
+}
+
+#else
 
 #if ENABLE_FLOW_CALIBRATION_TEST_A
 void runFlowCalibrationTestA() {
@@ -330,22 +466,6 @@ const char* phStatus(float ph) {
     if (ph < 5.9f) return "PH_UP";
     if (ph > 6.5f) return "PH_DOWN";
     return "OK";
-}
-
-void logLine(const char* level, const char* component, const char* message) {
-    Serial.printf(
-        "t=%010lu | %-5s | %-8s | %s\n",
-        millis(),
-        level,
-        component,
-        message
-    );
-}
-
-void logBootStep(const char* component, const char* status) {
-    char message[96];
-    snprintf(message, sizeof(message), "init=%s", status);
-    logLine("INFO", component, message);
 }
 
 void logRTCStatus() {
@@ -688,3 +808,5 @@ void loop() {
         logSystemStatus(sensorData);
     }
 }
+
+#endif  // RELAY_ONLY_MODE

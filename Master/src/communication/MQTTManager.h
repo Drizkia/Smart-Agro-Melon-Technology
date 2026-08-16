@@ -64,7 +64,7 @@
 
 // MQTT sekarang dipakai publish-only. Input FSM/command diambil dari
 // Master/data/FSMInputData.h sampai inbound web siap dipakai lagi.
-#define MQTT_RECEIVE_ENABLED 1
+#define MQTT_RECEIVE_ENABLED 0
 
 // Jika 0, firmware tidak akan membuka captive portal/blocking WiFi saat boot.
 // FSM tetap jalan offline; MQTT publish dicoba hanya saat WiFi sudah terhubung.

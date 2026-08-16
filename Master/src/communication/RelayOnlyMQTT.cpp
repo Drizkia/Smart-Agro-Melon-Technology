@@ -5,11 +5,15 @@ RelayOnlyMQTT* RelayOnlyMQTT::_instance = nullptr;
 
 RelayOnlyMQTT::RelayOnlyMQTT(RelayManager& relay,
                              RTCManager& rtc,
-                             TimerIrrigationScheduler& sched)
+                             TimerIrrigationScheduler& sched,
+                             FlowMeter& a,
+                             FlowMeter& b)
     : mqttClient(wifiClient),
       relayManager(relay),
       rtcManager(rtc),
-      scheduler(sched)
+      scheduler(sched),
+      flowA(a),
+      flowB(b)
 {
     _instance = this;
 }
@@ -52,6 +56,11 @@ void RelayOnlyMQTT::update() {
     if (now - lastTimerPublish >= MQTT_PUBLISH_INTERVAL) {
         lastTimerPublish = now;
         publishTimerStatus();
+    }
+
+    if (now - lastFlowPublish >= MQTT_PUBLISH_INTERVAL) {
+        lastFlowPublish = now;
+        publishFlowStatus();
     }
 }
 
@@ -223,6 +232,10 @@ bool RelayOnlyMQTT::executeRelayCommand(const JsonDocument& doc) {
 
     const char* action = doc["action"] | doc["state"] | doc["cmd"] | "toggle";
     RelayChannel channel = relayIndexToChannel(relayIndex);
+
+    // Keadaan relay SEBELUM aksi diterapkan. Dipakai mendeteksi transisi
+    // OFF -> ON untuk auto-reset penghitung flow.
+    bool wasOn = relayManager.isOn(channel);
     bool ok = true;
 
     if (strcmp(action, "on") == 0) {
@@ -243,6 +256,8 @@ bool RelayOnlyMQTT::executeRelayCommand(const JsonDocument& doc) {
         return false;
     }
 
+    resetFlowOnPumpStart(channel, wasOn);
+
     Serial.printf(
         "t=%010lu | INFO  | CMD      | relay=%u action=%s sumber=manual\n",
         millis(),
@@ -253,6 +268,23 @@ bool RelayOnlyMQTT::executeRelayCommand(const JsonDocument& doc) {
     publishRelayCommandAck(relayIndex, action, true);
     publishRelayStatus();
     return true;
+}
+
+void RelayOnlyMQTT::resetFlowOnPumpStart(RelayChannel channel, bool wasOn) {
+    // Sudah menyala sebelumnya — perintah "on" berulang tidak boleh menolkan
+    // penghitung di tengah sesi dosis.
+    if (wasOn) return;
+
+    // Aksi tidak menghasilkan keadaan ON (mis. "off" atau "all_off").
+    if (!relayManager.isOn(channel)) return;
+
+    if (channel == RELAY_PUMP_A) {
+        flowA.reset();
+        Serial.printf("t=%010lu | INFO  | FLOW     | A=reset alasan=pump_a_start\n", millis());
+    } else if (channel == RELAY_PUMP_B) {
+        flowB.reset();
+        Serial.printf("t=%010lu | INFO  | FLOW     | B=reset alasan=pump_b_start\n", millis());
+    }
 }
 
 void RelayOnlyMQTT::handleRemoteReset(const String& payload) {
@@ -378,4 +410,29 @@ void RelayOnlyMQTT::publishTimerStatus() {
     char buf[256];
     serializeJson(doc, buf);
     mqttClient.publish(TOPIC_TIMER_STATUS, buf, true);
+}
+
+void RelayOnlyMQTT::publishFlowStatus() {
+    JsonDocument doc;
+    doc["device_id"] = MQTT_CLIENT_ID;
+
+    // CATATAN: FlowMeter::getFlowRate() menghitung laju sejak panggilan
+    // TERAKHIR-nya, jadi ia hanya boleh dipanggil dari satu tempat. Fungsi ini
+    // satu-satunya pemanggil; log serial di Main.ino sengaja hanya menampilkan
+    // liter, bukan laju, supaya perhitungannya tidak terpotong.
+    JsonObject a = doc["a"].to<JsonObject>();
+    a["liter"]    = round(flowA.getVolumeLiter() * 1000.0f) / 1000.0f;
+    a["rate_lpm"] = round(flowA.getFlowRate() * 100.0f) / 100.0f;
+    a["pump_on"]  = relayManager.isOn(RELAY_PUMP_A);
+
+    JsonObject b = doc["b"].to<JsonObject>();
+    b["liter"]    = round(flowB.getVolumeLiter() * 1000.0f) / 1000.0f;
+    b["rate_lpm"] = round(flowB.getFlowRate() * 100.0f) / 100.0f;
+    b["pump_on"]  = relayManager.isOn(RELAY_PUMP_B);
+
+    doc["uptime_ms"] = millis();
+
+    char buf[256];
+    serializeJson(doc, buf);
+    mqttClient.publish(TOPIC_FLOW_STATUS, buf, true);
 }

@@ -37,7 +37,12 @@ Ditetapkan bersama pemilik proyek sebelum desain ini ditulis:
 | Konflik manual vs jadwal | Operator menang; penjadwal edge-triggered |
 | Basis kode | Kembangkan `Master/`, bukan project `Timing/` |
 | Relay penyiraman | `RELAY_PUMP_MIX` (ch8) + `RELAY_SOLENOID_IRRIG` (ch4) |
-| Flow meter irigasi | Tidak dipasang |
+| Flow meter irigasi (pin 9) | Tidak dipasang |
+| Flow meter nutrisi A & B (pin 10, 11) | Dibaca; ditolkan otomatis saat pompanya berpindah OFF → ON |
+
+Baris terakhir ditambahkan setelah implementasi Task 1-6 selesai: operator yang
+mendosis nutrisi manual lewat tombol relay tidak punya umpan balik volume sama
+sekali tanpa ini. Lihat Bagian 3.6.
 
 ### 2.1 Kenapa `Master/`, bukan `Timing/`
 
@@ -77,9 +82,9 @@ Main.ino                                    Main.ino
   ├─ ConfigManager  (slot jadwal saja)        ├─ ConfigManager
   ├─ RelayManager                             ├─ RelayManager
   ├─ RTCManager                               ├─ RTCManager
-  ├─ TimerIrrigationScheduler   <── baru      ├─ SensorManager + 6 sensor
-  └─ RelayOnlyMQTT              <── baru      ├─ ESPNowManager + SoilHealthMonitor
-                                              ├─ RecoveryManager
+  ├─ FlowMeter A & B  (baca saja)             ├─ SensorManager + 6 sensor
+  ├─ TimerIrrigationScheduler   <── baru      ├─ ESPNowManager + SoilHealthMonitor
+  └─ RelayOnlyMQTT              <── baru      ├─ RecoveryManager
                                               ├─ FertigationFSM
                                               └─ MQTTManager
 ```
@@ -219,9 +224,12 @@ Satu percabangan `#if RELAY_ONLY_MODE` di tiga tempat: deklarasi objek global,
 8. `mqtt.begin()`.
 
 Tidak di-`begin()`, tidak dibuat objeknya: `PHSensor`, `TDSSensor`, `WaterLevel`,
-`WaterTempSensor`, `FlowMeter` (ketiganya, termasuk pemasangan ISR),
-`ESPNowManager`, `SoilHealthMonitor`, `SensorManager`, `RecipeManager`,
-`IrrigationRecipe`, `RecoveryManager`, `FertigationFSM`, `MQTTManager`.
+`WaterTempSensor`, `flowIrrig`, `ESPNowManager`, `SoilHealthMonitor`,
+`SensorManager`, `RecipeManager`, `IrrigationRecipe`, `RecoveryManager`,
+`FertigationFSM`, `MQTTManager`.
+
+Pengecualian: `flowA` dan `flowB` dibuat dan di-`begin()` berikut ISR-nya —
+lihat Bagian 3.6.
 
 `loop()` jalur relay-only:
 
@@ -232,8 +240,41 @@ mqtt.update();
 ```
 
 Log status serial di mode ini memuat: jam RTC, status RTC, state penjadwal,
-indeks slot aktif, daftar relay yang menyala, status WiFi dan MQTT. Tidak ada
-baris `SENSOR`, `FLOW`, maupun `SOIL`.
+indeks slot aktif, daftar relay yang menyala, status WiFi dan MQTT, ditambah
+satu baris `FLOW` (lihat Bagian 3.6). Tidak ada baris `SENSOR` maupun `SOIL`.
+
+### 3.6 Flow meter nutrisi A & B
+
+Ditambahkan setelah Task 1-6 selesai, atas permintaan pemilik proyek.
+
+`FlowMeter` (`Master/src/sensors/FlowMeter.cpp`) berdiri sendiri: satu pin, satu
+ISR penghitung pulsa dengan debounce 5 ms, dan pembagi `PULSES_PER_LITER = 125`.
+Ia tidak menyentuh I2C, tidak melewati `SensorManager`, dan tidak punya jalur
+apa pun yang bisa menggerakkan relay. Karena itu memakainya di mode relay-only
+tidak melanggar prinsip "tidak ada sensor yang menyetir aktuator" — beda dengan
+pH, TDS, dan ultrasonic yang dulu memang menyetir FSM.
+
+`flowA` (pin 10) dan `flowB` (pin 11) dibuat dan di-`begin()` di jalur
+relay-only, lengkap dengan ISR-nya. `flowIrrig` (pin 9) tetap tidak dipasang.
+
+Hubungan satu-satunya ke relay berarah sebaliknya: **auto-reset**. Di
+`RelayOnlyMQTT::executeRelayCommand()`, keadaan relay dibaca sebelum aksi
+diterapkan; bila `RELAY_PUMP_A` (ch6) atau `RELAY_PUMP_B` (ch7) berpindah dari
+OFF ke ON, penghitung flow channel itu ditolkan. Yang diuji adalah transisinya,
+bukan diterimanya perintah `on` — sehingga perintah `on` berulang saat pompa
+sudah menyala tidak menolkan penghitung di tengah sesi dosis. `toggle` yang
+menghasilkan OFF → ON ikut menolkan; `all_off` tidak. Akibatnya angka liter
+selalu berarti "liter sesi dosis ini", bukan akumulasi sejak boot.
+
+`FlowMeter::getFlowRate()` menghitung laju sejak panggilan terakhirnya, jadi ia
+hanya boleh dipanggil dari satu tempat. Pemanggil tunggalnya adalah
+`RelayOnlyMQTT::publishFlowStatus()`; log serial sengaja hanya menampilkan
+volume, bukan laju, agar perhitungannya tidak terpotong.
+
+Akurasi bergantung penuh pada `PULSES_PER_LITER` di `FlowMeter.h:43`. Untuk
+mengkalibrasi ulang lewat `ENABLE_FLOW_CALIBRATION_TEST_A/B`, `RELAY_ONLY_MODE`
+harus disetel 0 sementara — guard di Bagian 3.4 melarang keduanya menyala
+bersamaan.
 
 ## 4. Kontrak MQTT
 
@@ -287,6 +328,20 @@ bertipe boolean, plus array `active_relays`.
 - `active_slot`: indeks slot yang sedang berjalan, `-1` bila tidak ada.
 - `next_slot`: `null` bila tidak ada slot berikutnya hari ini.
 
+`greenhouse/flow/status` — baru (lihat Bagian 3.6):
+
+```json
+{
+  "device_id": "greenhouse-master-01",
+  "a": {"liter": 1.234, "rate_lpm": 0.85, "pump_on": true},
+  "b": {"liter": 0.000, "rate_lpm": 0.00, "pump_on": false},
+  "uptime_ms": 123456
+}
+```
+
+Dipisah dari `greenhouse/timer/status` karena keduanya urusan berbeda dengan
+pembaca berbeda di web: yang satu jadwal penyiraman, yang satu dosis nutrisi.
+
 `greenhouse/config/ack` — ACK per perintah relay, format tidak berubah dari
 `MQTTManager::publishRelayCommandAck()`.
 
@@ -304,7 +359,8 @@ broker.
 
 | Kejadian | Perilaku |
 |---|---|
-| Sensor apa pun | Tidak ada penanganan, karena tidak ada sensor yang di-init. Tidak ada jalur kode yang bisa memicu `ErrorCode`. |
+| Sensor selain flow A/B | Tidak ada penanganan, karena tidak ada yang di-init. Tidak ada jalur kode yang bisa memicu `ErrorCode`. |
+| Flow meter A/B mati atau kabelnya lepas | Tidak ada penanganan, dan memang tidak diperlukan: angka liter akan diam di 0 dan operator melihatnya sendiri di web. Tidak ada relay yang terpengaruh. |
 | RTC gagal dibaca | Relay irigasi dimatikan bila sedang menyiram; state `RTC_ERROR`; tidak ada slot dijalankan sampai pulih. |
 | WiFi/MQTT putus | Penjadwal jalan terus offline. Saat reconnect tidak ada relay yang disentuh; hanya publish status. |
 | Reboot di tengah slot | Semua relay mati oleh `RelayManager::begin()`, dan penjadwal mulai dari anggapan "di luar slot", jadi tick pertama mendeteksi tepi masuk dan menyalakan irigasi kembali. |
@@ -318,12 +374,12 @@ sebelum flash.
 
 ## 6. Yang Sengaja Tidak Dikerjakan
 
-- **Flow meter irigasi tidak dipasang.** `flowIrrig` (pin 9) sebenarnya satu-satunya
-  sensor yang masih relevan — ia bisa mencatat liter per slot dan tidak akan
-  pernah bisa mengubah atau menghentikan penyiraman. Diputuskan tidak dipakai
-  agar mode ini benar-benar bebas sensor. Bila nanti diinginkan, penambahannya
-  terbatas pada `flowIrrig.begin(ISR)` dan satu field liter di
+- **Flow meter irigasi tidak dipasang.** `flowIrrig` (pin 9) bisa mencatat liter
+  per slot dan tidak akan pernah bisa mengubah atau menghentikan penyiraman,
+  tapi diputuskan tidak dipakai. Bila nanti diinginkan, penambahannya terbatas
+  pada `flowIrrig.begin(ISR)` dan satu field liter di
   `greenhouse/timer/status`, tanpa menyentuh logika relay.
+  (Flow meter nutrisi A dan B **dipakai** — lihat Bagian 3.6.)
 - Aplikasi web tidak diubah.
 - Firmware `Sleeve/` tidak diubah.
 - Project `Timing/` tidak diubah dan tidak dihapus.
@@ -357,3 +413,14 @@ flag saja), sehingga verifikasi dilakukan lewat kompilasi dan uji hardware.
 8. Uji seluruh 8 relay dari web satu per satu, memastikan ch5
    (`RELAY_WATER_INLET`, yang memakai workaround `INPUT_PULLUP`) benar-benar mati
    saat diperintahkan `off`.
+9. Uji flow A/B (Bagian 3.6):
+   - Nyalakan pompa A (ch6) dari web. `greenhouse/flow/status` harus mulai dari
+     `a.liter` 0 lalu naik, dan `a.pump_on` `true`.
+   - Kirim `on` sekali lagi saat pompa masih menyala. `a.liter` **tidak boleh**
+     kembali ke 0 — inilah yang membuktikan auto-reset memakai deteksi transisi,
+     bukan sekadar diterimanya perintah.
+   - Matikan pompa. `a.liter` berhenti bertambah tapi nilainya tetap terbaca.
+   - Ulangi untuk pompa B (ch7).
+   - Bandingkan liter yang terbaca dengan takaran gelas ukur untuk memastikan
+     `PULSES_PER_LITER = 125` masih sesuai. Bila meleset, kalibrasi ulang dengan
+     `RELAY_ONLY_MODE 0` sementara.

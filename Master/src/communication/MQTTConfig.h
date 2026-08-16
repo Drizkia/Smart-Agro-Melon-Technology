@@ -24,6 +24,10 @@
 // Status penjadwal timer — hanya dipublish saat RELAY_ONLY_MODE.
 #define TOPIC_TIMER_STATUS  "greenhouse/timer/status"
 
+// Pembacaan flow meter nutrisi A & B — hanya dipublish saat RELAY_ONLY_MODE.
+// Dipakai operator untuk tahu berapa liter yang sudah didosis manual.
+#define TOPIC_FLOW_STATUS   "greenhouse/flow/status"
+
 // =========================================
 // MQTT TOPICS — Commands (subscribe)
 // =========================================

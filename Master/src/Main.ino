@@ -56,8 +56,21 @@ RelayManager  relay;
 RTCManager    rtcManager;
 ConfigManager configManager;
 
+// Flow meter nutrisi A & B — satu-satunya sensor yang dipakai di mode ini.
+// Murni pembacaan untuk dosis manual: tidak ada jalur balik ke relay.
+FlowMeter flowA(FLOW_A_PIN);
+FlowMeter flowB(FLOW_B_PIN);
+
 TimerIrrigationScheduler scheduler(rtcManager, relay, configManager);
-RelayOnlyMQTT            mqtt(relay, rtcManager, scheduler);
+RelayOnlyMQTT            mqtt(relay, rtcManager, scheduler, flowA, flowB);
+
+void IRAM_ATTR flowAISR() {
+    flowA.recordPulseFromISR();
+}
+
+void IRAM_ATTR flowBISR() {
+    flowB.recordPulseFromISR();
+}
 
 #else
 
@@ -225,6 +238,18 @@ void logRelayOnlyStatus() {
         rtcManager.getHour(), rtcManager.getMinute()
     );
 
+    // Sengaja tanpa laju (L/min): FlowMeter::getFlowRate() menghitung sejak
+    // panggilan terakhirnya, dan pemanggil satu-satunya adalah
+    // RelayOnlyMQTT::publishFlowStatus(). Di sini cukup volume akumulasi sesi.
+    Serial.printf(
+        "t=%010lu | INFO  | FLOW     | A=%.3fL pump=%s B=%.3fL pump=%s\n",
+        millis(),
+        flowA.getVolumeLiter(),
+        relay.isOn(RELAY_PUMP_A) ? "ON" : "OFF",
+        flowB.getVolumeLiter(),
+        relay.isOn(RELAY_PUMP_B) ? "ON" : "OFF"
+    );
+
     Serial.printf(
         "t=%010lu | INFO  | NETWORK  | wifi=%s mqtt=%s ip=%s\n",
         millis(),
@@ -252,6 +277,10 @@ void setup() {
 
     relay.begin();   // sudah memanggil allOff()
     logBootStep("RELAY", "ready");
+
+    flowA.begin(flowAISR);
+    flowB.begin(flowBISR);
+    logBootStep("FLOW", "ready");
 
     Wire.begin(
         I2C_SDA_PIN,

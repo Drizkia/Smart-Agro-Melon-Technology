@@ -2,6 +2,7 @@
 #define FERTIGATION_FSM_H
 
 #include "FertigationState.h"
+#include "TestFlags.h"
 
 #include "../sensors/SensorManager.h"
 #include "../actuators/RelayManager.h"
@@ -262,6 +263,12 @@ private:
     // Tracking slot jadwal yang sedang aktif
     int8_t _activeSlotIdx = -1;       // -1 = tidak ada slot aktif
     bool   _timerSlotRunning = false; // apakah sedang dalam window irigasi timer
+
+#if ENABLE_IRRIGATION_TEST
+    // Set true saat IRRIGATION_TEST_DURATION_MS tercapai, supaya relay tidak
+    // dinyalakan ulang setiap loop.
+    bool _irrigTestDone = false;
+#endif
 
     // --- ERROR auto-recovery state ---
     // Timestamp masuk ke state ERROR. Digunakan handleError() untuk

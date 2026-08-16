@@ -5,9 +5,14 @@
 #define ENABLE_FULL_SYSTEM_TEST           0
 #define ENABLE_MQTT_CONFIGURATION_TEST    0
 
-// Test irigasi langsung: skip FILL_WATER & mixing, langsung masuk PRE_IRRIGATION_MIX.
+// Test irigasi langsung: skip FILL_WATER & mixing, langsung masuk state IRRIGATION.
 // Gunakan ini untuk verifikasi pompa irigasi, flow sensor irigasi, dan durasi irigasi.
 #define ENABLE_IRRIGATION_TEST            0
+
+// Durasi irigasi saat ENABLE_IRRIGATION_TEST (ms).
+// 0 = nyala terus sampai board di-reset / flag dimatikan.
+// Contoh: 60000UL = 1 menit, 300000UL = 5 menit.
+#define IRRIGATION_TEST_DURATION_MS       0UL
 
 // Kalibrasi flow sensor dengan target volume.
 // Set A=1 → test Pompa A + Solenoid A saja, relay lain mati.

@@ -86,8 +86,9 @@ void FertigationFSM::begin() {
         changeState(FertigationState::IDLE);
     } else {
 #if ENABLE_IRRIGATION_TEST
-        logStateAction("[FSM][TEST] IRRIGATION_TEST: skip mix, langsung PRE_IRRIGATION_MIX");
-        startIrrigationOutput();
+        logStateAction("[FSM][TEST] IRRIGATION_TEST: skip mix, langsung IRRIGATION");
+        irrigFlow.reset();
+        changeState(FertigationState::IRRIGATION);
 #elif SKIP_DAILY_SCHEDULE || ENABLE_FULL_SYSTEM_TEST
         changeState(FertigationState::PREPARE_DAILY_MIX);
 #else
@@ -1255,8 +1256,23 @@ void FertigationFSM::handleIrrigation() {
     if (!stateInitialized) {
         startIrrigationOutput();
         stateInitialized = true;
+        stateStartTime   = millis();
         logStateAction("[FSM] Start Irrigation");
     }
+
+#if ENABLE_IRRIGATION_TEST
+    // Mode test: abaikan soil ADC & slot timer. Irigasi nyala terus
+    // (IRRIGATION_TEST_DURATION_MS == 0) atau sampai durasi test tercapai.
+    if (_irrigTestDone) {
+        return;
+    }
+    if (IRRIGATION_TEST_DURATION_MS > 0UL && isStateTimeout(IRRIGATION_TEST_DURATION_MS)) {
+        stopIrrigationOutput();
+        _irrigTestDone = true;
+        logStateAction("[FSM][TEST] Durasi IRRIGATION_TEST tercapai — irigasi OFF");
+    }
+    return;
+#endif
 
     // TIMER mode: berhenti saat slot RTC berakhir (bukan berdasarkan soil ADC)
     if (soilHealthMonitor.getMode() == IrrigationMode::TIMER) {

@@ -59,8 +59,47 @@
 #define TOPIC_SOIL_HEALTH       "greenhouse/soil/health"
 #define TOPIC_ALERT_TANK_LOW    "greenhouse/alert/tank_low"
 
+// =========================================
+// MQTT TOPIC — Liveness (LWT, retained)
+// =========================================
+// Satu-satunya sumber kebenaran status koneksi untuk web. Nilainya "online"
+// (dipublish retained saat connect sukses) atau "offline" (dipasang sebagai
+// Last Will, diterbitkan broker otomatis kalau koneksi hilang tanpa DISCONNECT
+// — mati listrik, WiFi putus, ESP crash).
+//
+// PENTING untuk sisi web: "offline" berarti LINK MQTT putus, BUKAN perangkat
+// mati. FSM tetap jalan offline dan relay tidak disentuh saat status offline.
+#define TOPIC_STATUS            "greenhouse/status"
+#define MQTT_STATUS_ONLINE      "online"
+#define MQTT_STATUS_OFFLINE     "offline"
+
 // Interval publish sensor (ms)
 #define MQTT_PUBLISH_INTERVAL 1000UL
+
+// =========================================
+// Reconnect non-blocking — backoff eksponensial
+// =========================================
+// WiFi maupun MQTT di-retry dari update(), bukan sekali di begin(). Backoff
+// dipakai supaya percobaan yang gagal tidak menahan loop() tiap iterasi.
+#define WIFI_RETRY_BASE_MS      5000UL
+#define WIFI_RETRY_MAX_MS       60000UL
+#define MQTT_RETRY_BASE_MS      5000UL
+#define MQTT_RETRY_MAX_MS       60000UL
+
+// Keepalive broker (detik). Default PubSubClient 15 detik terlalu sensitif —
+// broker menyatakan klien hilang setelah ~22 detik, sehingga hiccup WiFi
+// sebentar saja sudah memicu "offline" palsu di web.
+#define MQTT_KEEPALIVE_SEC      60
+
+// Socket timeout (detik). Default PubSubClient 15 detik: satu percobaan
+// connect yang gagal memblokir loop() selama itu dan menyendat FSM.
+#define MQTT_SOCKET_TIMEOUT_SEC 5
+
+// Ambang alert MQTT putus. Hanya menaikkan WARN di serial + flag —
+// TIDAK menyentuh relay. Durasi pompa tetap dibatasi timeout per-state FSM
+// (WATER_FILL_TIMEOUT, NUTRIENT_TIMEOUT) supaya gangguan jaringan tidak
+// menghentikan fertigasi yang sedang berjalan.
+#define MQTT_OFFLINE_ALERT_MS   300000UL
 
 // MQTT sekarang dipakai publish-only. Input FSM/command diambil dari
 // Master/data/FSMInputData.h sampai inbound web siap dipakai lagi.
@@ -96,9 +135,20 @@ public:
 
     bool isConnected();
 
+    // True kalau link MQTT sudah putus lebih lama dari MQTT_OFFLINE_ALERT_MS.
+    // Murni observasi — pemanggil tidak boleh memakai ini untuk mematikan relay.
+    bool isOfflineTooLong() const;
+
+    // Lama link MQTT putus (ms). 0 kalau sedang terhubung.
+    unsigned long getOfflineDurationMs() const;
+
 private:
     void connectWiFi();
     void connectMQTT();
+
+    // Dipanggil tiap update() — retry non-blocking dengan backoff.
+    void maintainWiFi();
+    void maintainMQTT();
 
     void publishSensors(const SensorData& data);
     void publishConfigAck(const char* configName, bool success);
@@ -139,6 +189,17 @@ private:
     unsigned long lastPublish = 0;
     unsigned long lastSoilPublish = 0;
     unsigned long lastRelayPublish = 0;
+
+    // State reconnect WiFi
+    unsigned long lastWiFiRetryMs = 0;
+    uint8_t       wifiRetryCount  = 0;
+    bool          lastWiFiUp      = false;
+
+    // State reconnect MQTT
+    unsigned long lastMQTTRetryMs = 0;
+    uint8_t       mqttRetryCount  = 0;
+    unsigned long lastMqttOkMs    = 0;
+    bool          offlineAlertRaised = false;
     FertigationState lastFSMState = FertigationState::IDLE;
     IrrigationMode lastIrrigMode = IrrigationMode::HUMIDITY;
 

@@ -2,6 +2,7 @@
 
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_task_wdt.h>
 #include <Preferences.h>
 
 #include "config/PinConfig.h"
@@ -107,6 +108,11 @@ MQTTManager mqtt(relay, configManager, rtcManager, waterLevel, soilHealth, fsm);
 
 static constexpr unsigned long STATUS_LOG_INTERVAL_MS = 5000UL;
 static const char* FIRMWARE_BUILD_ID = __DATE__ " " __TIME__;
+
+// Watchdog hardware: reset otomatis kalau loop() menggantung.
+// 60 detik, bukan 30 — satu percobaan connect MQTT yang gagal masih bisa
+// menahan loop sampai MQTT_SOCKET_TIMEOUT_SEC dan itu bukan hang.
+static constexpr uint32_t WDT_TIMEOUT_S = 60;
 
 void clearPreferencesNamespace(const char* ns) {
     Preferences prefs;
@@ -505,6 +511,24 @@ void logConnectionEvent(bool mqttConnected) {
     logLine(mqttConnected ? "INFO" : "WARN", "NETWORK", message);
 }
 
+void setupWatchdog() {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    esp_task_wdt_config_t wdtConfig = {
+        .timeout_ms     = WDT_TIMEOUT_S * 1000U,
+        .idle_core_mask = 0,
+        .trigger_panic  = true
+    };
+    esp_task_wdt_reconfigure(&wdtConfig);
+#else
+    esp_task_wdt_init(WDT_TIMEOUT_S, true);
+#endif
+    esp_task_wdt_add(NULL);
+
+    char message[64];
+    snprintf(message, sizeof(message), "watchdog=armed timeout=%us", (unsigned)WDT_TIMEOUT_S);
+    logLine("INFO", "WDT", message);
+}
+
 void IRAM_ATTR flowAISR() {
     flowA.recordPulseFromISR();
 }
@@ -629,9 +653,19 @@ void setup() {
 
     logLine("INFO", "BOOT", "system=ready");
     delay(5000);
+
+    // Didaftarkan paling akhir: mqtt.begin() bisa membuka captive portal
+    // WiFiManager yang blocking sampai 180 detik dan akan memicu reset palsu
+    // kalau watchdog sudah aktif duluan.
+    setupWatchdog();
 }
 
 void loop() {
+    // Di awal loop supaya jalur test yang return lebih awal ikut memberi makan
+    // watchdog. Aman kalau belum di-arm (mode test keluar dari setup lebih
+    // awal): esp_task_wdt_reset() cuma mengembalikan error, tidak crash.
+    esp_task_wdt_reset();
+
 #if ENABLE_FLOW_CALIBRATION_TEST_A
     runFlowCalibrationTestA();
     return;

@@ -6,6 +6,18 @@
 MQTTManager* MQTTManager::_instance      = nullptr;
 
 // =========================================
+// retryBackoff() — backoff eksponensial dengan cap
+// attempt=1 -> base, 2 -> base*2, 3 -> base*4, ... dibatasi maxMs.
+// =========================================
+static unsigned long retryBackoff(uint8_t attempt, unsigned long base, unsigned long maxMs) {
+    unsigned long backoff = base;
+    for (uint8_t i = 1; i < attempt && backoff < maxMs; i++) {
+        backoff <<= 1;
+    }
+    return backoff > maxMs ? maxMs : backoff;
+}
+
+// =========================================
 // Constructor
 // =========================================
 MQTTManager::MQTTManager(RelayManager& relay, ConfigManager& config,
@@ -40,6 +52,15 @@ void MQTTManager::begin() {
     mqttClient.setCallback(onMessage);
 #endif
     mqttClient.setBufferSize(1024);
+    mqttClient.setKeepAlive(MQTT_KEEPALIVE_SEC);
+    mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
+
+    // Auto-reconnect driver WiFi sebagai lapisan pertama; maintainWiFi()
+    // tetap jadi jaring pengaman kalau driver menyerah.
+    WiFi.setAutoReconnect(true);
+
+    lastWiFiUp   = (WiFi.status() == WL_CONNECTED);
+    lastMqttOkMs = millis();
 
     if (WiFi.status() == WL_CONNECTED) {
         connectMQTT();
@@ -54,13 +75,20 @@ void MQTTManager::update(
     FertigationState fsmState,
     ErrorCode errorCode
 ) {
+    // Retry WiFi non-blocking. Sebelumnya update() langsung return di sini,
+    // sehingga sekali WiFi putus di tengah jalan koneksi tidak pernah pulih
+    // sampai perangkat di-reboot — FSM tetap jalan, tapi web tidak menerima
+    // apa pun dan menyimpulkan ESP mati.
+    maintainWiFi();
+
     if (WiFi.status() != WL_CONNECTED) {
         return;
     }
 
-    if (!mqttClient.connected()) {
-        connectMQTT();
-    }
+    // Retry MQTT dengan backoff. Sebelumnya connectMQTT() dipanggil tiap
+    // iterasi loop saat terputus; tiap percobaan melakukan TLS handshake yang
+    // memblokir sampai MQTT_SOCKET_TIMEOUT_SEC dan menyendat fsm.update().
+    maintainMQTT();
 
     if (!mqttClient.connected()) {
         return;
@@ -226,6 +254,16 @@ void MQTTManager::publishConfigAck(const char* configName, bool success) {
 // =========================================
 bool MQTTManager::isConnected() {
     return mqttClient.connected();
+}
+
+bool MQTTManager::isOfflineTooLong() const {
+    return offlineAlertRaised;
+}
+
+unsigned long MQTTManager::getOfflineDurationMs() const {
+    // lastMqttOkMs di-refresh tiap update() selama link hidup, jadi nilainya
+    // mendekati 0 saat terhubung tanpa perlu cek connected() (yang non-const).
+    return millis() - lastMqttOkMs;
 }
 
 // =========================================
@@ -505,6 +543,97 @@ void MQTTManager::handleConfigSchedule(const JsonDocument& doc) {
 }
 
 // =========================================
+// maintainWiFi() — reconnect non-blocking, dipanggil tiap update()
+//
+// TIDAK memakai WiFiManager: wm.autoConnect() blocking sampai 180 detik dan
+// akan menahan fsm.update() selama itu — berbahaya kalau pompa sedang menyala.
+// WiFi.reconnect() memakai kredensial yang sudah tersimpan di NVS dan langsung
+// kembali (esp_wifi_disconnect + esp_wifi_connect, keduanya asinkron).
+// =========================================
+void MQTTManager::maintainWiFi() {
+    bool up = (WiFi.status() == WL_CONNECTED);
+
+    if (up != lastWiFiUp) {
+        lastWiFiUp = up;
+        Serial.printf(
+            "t=%010lu | %s | WIFI     | link=%s ip=%s\n",
+            millis(),
+            up ? "INFO " : "WARN ",
+            up ? "UP" : "DOWN",
+            WiFi.localIP().toString().c_str()
+        );
+    }
+
+    if (up) {
+        wifiRetryCount = 0;
+        return;
+    }
+
+    unsigned long now = millis();
+    if (wifiRetryCount > 0 &&
+        (now - lastWiFiRetryMs) < retryBackoff(wifiRetryCount, WIFI_RETRY_BASE_MS, WIFI_RETRY_MAX_MS)) {
+        return;
+    }
+
+    lastWiFiRetryMs = now;
+    if (wifiRetryCount < 255) wifiRetryCount++;
+
+    // reconnect() gagal kalau config driver sudah hilang; begin() tanpa argumen
+    // membaca ulang kredensial dari NVS sebagai fallback.
+    if (!WiFi.reconnect()) {
+        WiFi.begin();
+    }
+
+    Serial.printf(
+        "t=%010lu | WARN  | WIFI     | reconnect=attempt n=%u next_retry_in=%lums\n",
+        now,
+        wifiRetryCount,
+        retryBackoff(wifiRetryCount, WIFI_RETRY_BASE_MS, WIFI_RETRY_MAX_MS)
+    );
+}
+
+// =========================================
+// maintainMQTT() — reconnect berbackoff + alert offline
+//
+// Alert tidak menyentuh relay: MQTT di sini publish-only (telemetri), dan FSM
+// memang dirancang jalan offline. Memutus fertigasi karena telemetri hilang
+// berarti gangguan jaringan menghentikan penyiraman. Batas durasi pompa tetap
+// dipegang timeout per-state di FertigationFSM.
+// =========================================
+void MQTTManager::maintainMQTT() {
+    unsigned long now = millis();
+
+    if (mqttClient.connected()) {
+        mqttRetryCount = 0;
+        lastMqttOkMs   = now;
+        if (offlineAlertRaised) {
+            offlineAlertRaised = false;
+            Serial.printf("t=%010lu | INFO  | MQTT     | offline_alert=cleared\n", now);
+        }
+        return;
+    }
+
+    if (!offlineAlertRaised && (now - lastMqttOkMs) >= MQTT_OFFLINE_ALERT_MS) {
+        offlineAlertRaised = true;
+        Serial.printf(
+            "t=%010lu | WARN  | MQTT     | offline_for=%lus relay=UNTOUCHED fsm=RUNNING\n",
+            now,
+            (now - lastMqttOkMs) / 1000UL
+        );
+    }
+
+    if (mqttRetryCount > 0 &&
+        (now - lastMQTTRetryMs) < retryBackoff(mqttRetryCount, MQTT_RETRY_BASE_MS, MQTT_RETRY_MAX_MS)) {
+        return;
+    }
+
+    lastMQTTRetryMs = now;
+    if (mqttRetryCount < 255) mqttRetryCount++;
+
+    connectMQTT();
+}
+
+// =========================================
 // connectWiFi() — via WiFiManager captive portal
 // Kredensial disimpan di NVS oleh WiFiManager.
 // Jika belum pernah dikonfigurasi / koneksi gagal, buka AP "AgroTech Melon"
@@ -580,10 +709,22 @@ void MQTTManager::connectMQTT() {
 
     wifiClient.setInsecure();
 
-    bool ok = mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS);
+    // Last Will: broker menerbitkan "offline" retained ke TOPIC_STATUS kalau
+    // koneksi hilang tanpa DISCONNECT. Web membaca satu topic ini untuk
+    // liveness, bukan menebak dari umur pesan greenhouse/sensors.
+    bool ok = mqttClient.connect(
+        MQTT_CLIENT_ID,
+        MQTT_USER,
+        MQTT_PASS,
+        TOPIC_STATUS,
+        1,      // willQos
+        true,   // willRetain
+        MQTT_STATUS_OFFLINE
+    );
 
     if (ok) {
-        Serial.printf("t=%010lu | INFO  | MQTT     | connected=true\n", millis());
+        mqttClient.publish(TOPIC_STATUS, MQTT_STATUS_ONLINE, true);
+        Serial.printf("t=%010lu | INFO  | MQTT     | connected=true status=online\n", millis());
 #if MQTT_RECEIVE_ENABLED
         mqttClient.subscribe(TOPIC_CMD);
         mqttClient.subscribe(TOPIC_CFG_PPM);
@@ -737,7 +878,12 @@ void MQTTManager::handleRemoteReset(const String& payload) {
     char buf[192];
     serializeJson(ack, buf);
     mqttClient.publish(TOPIC_CMD_RESET_ACK, buf, false);
-    mqttClient.loop();  // flush ACK ke broker sebelum restart
+
+    // Restart terencana: tandai offline sendiri supaya web tidak membacanya
+    // sebagai crash. Tanpa ini, LWT yang menerbitkannya dan keduanya jadi
+    // tak terbedakan.
+    mqttClient.publish(TOPIC_STATUS, MQTT_STATUS_OFFLINE, true);
+    mqttClient.loop();  // flush ACK + status ke broker sebelum restart
 
     Serial.printf(
         "t=%010lu | WARN  | RESET    | remote_reset triggered reason=%s\n",

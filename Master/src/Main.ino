@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <esp_task_wdt.h>
 
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -15,6 +16,7 @@
 #include "data/FlowCalibrationTestData.h"
 #include "FSMInputData.h"
 #include "TimeWindowTests.h"
+#include "LinkWatchdogTests.h"
 
 #include "actuators/RelayManager.h"
 
@@ -141,6 +143,25 @@ FertigationFSM fsm(
 MQTTManager mqtt(relay, configManager, rtcManager, waterLevel, soilHealth, fsm);
 
 #endif  // RELAY_ONLY_MODE
+
+// Watchdog perangkat keras: satu-satunya hal yang bisa menyelamatkan board
+// ketika loop() sendiri yang macet (deadlock, driver hang). Watchdog berbasis
+// software di RelayOnlyMQTT tidak bisa menangani kasus ini karena ia butuh
+// loop() tetap berjalan untuk dievaluasi.
+static void hardwareWatchdogBegin() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    esp_task_wdt_config_t cfg = {};
+    cfg.timeout_ms     = HW_WATCHDOG_TIMEOUT_S * 1000U;
+    cfg.idle_core_mask = 0;
+    cfg.trigger_panic  = true;
+    esp_task_wdt_reconfigure(&cfg);
+#else
+    // Bila TWDT sudah diinisialisasi runtime Arduino, panggilan ini hanya
+    // memperbarui timeout dan konfigurasi panic-nya.
+    esp_task_wdt_init(HW_WATCHDOG_TIMEOUT_S, true);
+#endif
+    esp_task_wdt_add(NULL);
+}
 
 static constexpr unsigned long STATUS_LOG_INTERVAL_MS = 5000UL;
 static const char* FIRMWARE_BUILD_ID = __DATE__ " " __TIME__;
@@ -296,10 +317,15 @@ void setup() {
     mqtt.begin();
     logBootStep("MQTT", mqtt.isConnected() ? "connected" : "disconnected");
 
+    hardwareWatchdogBegin();
+    logBootStep("WATCHDOG", "armed");
+
     logLine("INFO", "BOOT", "system=ready mode=RELAY_ONLY fsm=disabled sensors=disabled");
 }
 
 void loop() {
+    esp_task_wdt_reset();
+
     scheduler.update();
     mqtt.update();
 

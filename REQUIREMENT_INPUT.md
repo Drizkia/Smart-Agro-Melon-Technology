@@ -318,6 +318,72 @@ Keterangan:
 
 Field lama `mix_interval_days` dan `per_plant_need_liter` diabaikan.
 
+## 8b. Status Hidup/Mati Perangkat (WAJIB dipakai web)
+
+Topic publish firmware:
+
+```text
+greenhouse/status
+```
+
+**Inilah satu-satunya sumber kebenaran "ESP hidup atau mati". Web TIDAK boleh
+lagi menebaknya dari kesegaran topik lain.**
+
+Payload (retained, QoS 1):
+
+```json
+{ "device_id": "greenhouse-master-01", "status": "online" }
+{ "device_id": "greenhouse-master-01", "status": "offline" }
+```
+
+Cara kerja:
+
+- `online` dipublish firmware retained tepat setelah berhasil connect ke broker.
+- `offline` dipasang sebagai **Last Will** saat connect. Broker sendiri yang
+  menerbitkannya bila ESP hilang tanpa sempat pamit — WiFi putus, brownout,
+  listrik mati, atau board hang.
+- `offline` juga dipublish firmware secara sadar sebelum ia me-restart diri
+  (perintah reset dari web, atau failsafe link).
+- Karena retained, web yang baru subscribe langsung tahu keadaan terakhir.
+
+Kenapa ini ditambahkan:
+
+Sebelumnya firmware tidak pernah mengirim sinyal liveness apa pun. Web terpaksa
+menebak dari kesegaran `greenhouse/sensors`. Di `RELAY_ONLY_MODE` topik sensor
+memang tidak pernah dipublish — malah dihapus oleh `clearStaleRetainedTopics()` —
+sehingga tebakan itu **selalu** berbunyi "ESP mati" walau perangkatnya sehat.
+
+Catatan penting untuk web:
+
+- `greenhouse/actuators/status` adalah **retained**. Isinya tetap tampil walau
+  ESP sudah mati berhari-hari. Jangan pakai ada/tidaknya payload itu sebagai
+  tanda perangkat hidup — pakai `greenhouse/status`.
+- Saat `status` = `offline`, tampilkan status relay sebagai **keadaan terakhir
+  yang diketahui**, bukan keadaan sekarang. Firmware tidak bisa memastikan relay
+  fisiknya masih sesuai.
+
+## 8c. Failsafe Link Putus
+
+Bila firmware tidak bisa menjangkau broker:
+
+| Lama putus | Tindakan firmware |
+|---|---|
+| < 5 menit | Sambung ulang WiFi/MQTT berkala. Relay dibiarkan apa adanya. |
+| >= 5 menit | **Semua relay dimatikan** (`allOff`). |
+| >= 15 menit | Board restart. Boot memanggil `allOff()` lagi. |
+
+Ambangnya diatur di `Master/src/communication/MQTTConfig.h`
+(`LINK_FAILSAFE_MS`, `LINK_RESTART_MS`); nilai `0` mematikan masing-masing
+perilaku.
+
+Konsekuensi untuk web: relay bisa berubah menjadi OFF **tanpa ada perintah dari
+web**. Kalau `greenhouse/status` sempat `offline` lebih dari 5 menit, anggap
+seluruh relay sudah direset ke OFF.
+
+Tombol reset di web (`greenhouse/control/reset`) hanya sampai bila ESP sedang
+terhubung. Perangkat yang offline tidak bisa diselamatkan dari web — pemulihannya
+sekarang jadi tugas failsafe di atas.
+
 ## 9. Telemetry Status Relay / Aktuator
 
 Topic publish firmware:
@@ -341,6 +407,8 @@ Schema payload:
 {
   "device_id": "greenhouse-master-01",
   "timestamp": 123456,
+  "uptime_ms": 123456,
+  "rtc_time": "2026-08-21 14:33:05",
   "relays": {
     "relay_1": true,
     "relay_2": false,
@@ -372,6 +440,12 @@ Catatan untuk web/backend:
 
 - Untuk tampilan sederhana, tampilkan `relays.relay_x` sebagai ON/OFF.
 - Untuk highlight aktuator yang sedang jalan, gunakan `active_relays`.
+- `timestamp` dan `uptime_ms` sama-sama `millis()`, yaitu **uptime sejak boot**,
+  bukan waktu absolut. Jangan bandingkan dengan jam server untuk menghitung basi
+  — nilainya kembali ke ~0 setiap kali ESP restart.
+- `rtc_time` adalah jam dinding dari RTC (waktu lokal WIB, bukan UTC), atau
+  `null` bila RTC gagal dibaca. Ini yang bisa dipakai menampilkan "data per jam
+  berapa".
 - Status ini merepresentasikan state aktual output firmware saat loop MQTT berjalan, baik akibat FSM otomatis maupun command manual yang diterima saat `READY`.
 
 ## 10. Command Fertigasi / Aktuator

@@ -22,25 +22,108 @@ void RelayOnlyMQTT::begin() {
     Serial.printf("t=%010lu | INFO  | NETWORK  | wifi=begin mode=relay_only\n", millis());
     connectWiFi();
 
+    // Biarkan stack WiFi juga mencoba sendiri; maintainWiFi() tetap dibutuhkan
+    // sebagai jaring pengaman karena auto-reconnect bawaan menyerah pada
+    // sebagian kasus (AP hilang lama, DHCP gagal, stack wedged).
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
+
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
     mqttClient.setCallback(onMessage);
     mqttClient.setBufferSize(1024);
+
+    // Acuan awal watchdog. Tanpa ini lastLinkOkMs = 0 sementara millis() sudah
+    // berjalan, sehingga boot yang gagal konek bisa dianggap "sudah lama putus"
+    // dan langsung memicu restart beruntun.
+    lastLinkOkMs = millis();
 
     if (WiFi.status() == WL_CONNECTED) {
         connectMQTT();
     }
 }
 
-void RelayOnlyMQTT::update() {
-    if (WiFi.status() != WL_CONNECTED) {
+void RelayOnlyMQTT::maintainWiFi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiRetryAt = RETRY_NEVER_ATTEMPTED;
         return;
     }
 
-    if (!mqttClient.connected()) {
+    uint32_t now = millis();
+    if (!isRetryDue(wifiRetryAt, now, WIFI_RETRY_INTERVAL_MS)) {
+        return;
+    }
+    wifiRetryAt = now;
+
+    // WiFi.begin() tanpa argumen memakai kredensial yang sudah disimpan
+    // WiFiManager di NVS. Sengaja TIDAK memanggil WiFiManager di sini: captive
+    // portal-nya blocking sampai 180 detik dan akan membekukan penjadwal irigasi
+    // setiap kali sinyal hilang sebentar.
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+
+    Serial.printf(
+        "t=%010lu | WARN  | WIFI     | reconnect=dicoba status=%d interval=%lums\n",
+        millis(),
+        WiFi.status(),
+        WIFI_RETRY_INTERVAL_MS
+    );
+}
+
+void RelayOnlyMQTT::applyLinkWatchdog(bool linkUp) {
+    uint32_t offlineMs = elapsedSince(lastLinkOkMs, millis());
+
+    switch (decideLinkAction(linkUp, offlineMs, LINK_FAILSAFE_MS, LINK_RESTART_MS)) {
+        case LINK_OK:
+        case LINK_DEGRADED:
+            return;
+
+        case LINK_FAILSAFE:
+            if (failsafeApplied) return;
+            failsafeApplied = true;
+            relayManager.allOff();
+            Serial.printf(
+                "t=%010lu | WARN  | FAILSAFE | link putus %lus - SEMUA RELAY DIMATIKAN\n",
+                millis(),
+                offlineMs / 1000UL
+            );
+            return;
+
+        case LINK_RESTART:
+            Serial.printf(
+                "t=%010lu | WARN  | FAILSAFE | link putus %lus - restart board\n",
+                millis(),
+                offlineMs / 1000UL
+            );
+            relayManager.allOff();
+            Serial.flush();
+            delay(100);
+            ESP.restart();
+            return;
+    }
+}
+
+void RelayOnlyMQTT::update() {
+    // Sambung ulang WiFi bila putus. Dulu di sini hanya ada `return`, sehingga
+    // satu kali WiFi drop membuat perangkat offline permanen: connectWiFi()
+    // cuma pernah dipanggil dari begin(), dan perintah reset dari web tidak
+    // mungkin sampai karena jalurnya justru yang sedang rusak.
+    maintainWiFi();
+
+    if (WiFi.status() == WL_CONNECTED && !mqttClient.connected()) {
         connectMQTT();
     }
 
-    if (!mqttClient.connected()) {
+    bool linkUp = (WiFi.status() == WL_CONNECTED) && mqttClient.connected();
+    if (linkUp) {
+        lastLinkOkMs   = millis();
+        failsafeApplied = false;
+    }
+
+    // Dijalankan baik saat link hidup maupun mati — inilah yang mencegah relay
+    // terkunci menyala tanpa pengawasan saat perangkat tidak bisa dihubungi.
+    applyLinkWatchdog(linkUp);
+
+    if (!linkUp) {
         return;
     }
 
@@ -115,9 +198,29 @@ void RelayOnlyMQTT::connectMQTT() {
     if (mqttClient.connected()) return;
     if (WiFi.status() != WL_CONNECTED) return;
 
+    // connect() blocking sampai socket timeout (15 detik) bila broker tak bisa
+    // dihubungi. Tanpa throttle ini, tiap iterasi loop() menggantung selama itu
+    // dan penjadwal irigasi berhenti dievaluasi.
+    uint32_t now = millis();
+    if (!isRetryDue(mqttRetryAt, now, MQTT_RETRY_INTERVAL_MS)) {
+        return;
+    }
+    mqttRetryAt = now;
+
     wifiClient.setInsecure();
 
-    bool ok = mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS);
+    // Last Will: broker yang menerbitkan "offline" bila ESP hilang tanpa pamit —
+    // WiFi drop, brownout, atau listrik mati. Inilah sinyal yang membuat web
+    // tahu perangkat mati tanpa perlu menebak dari kesegaran topik sensor.
+    bool ok = mqttClient.connect(
+        MQTT_CLIENT_ID,
+        MQTT_USER,
+        MQTT_PASS,
+        TOPIC_DEVICE_STATUS,
+        STATUS_WILL_QOS,
+        STATUS_WILL_RETAIN,
+        PAYLOAD_STATUS_OFFLINE
+    );
 
     if (!ok) {
         Serial.printf(
@@ -131,10 +234,30 @@ void RelayOnlyMQTT::connectMQTT() {
 
     Serial.printf("t=%010lu | INFO  | MQTT     | connected=true mode=relay_only\n", millis());
 
+    mqttRetryAt  = RETRY_NEVER_ATTEMPTED;
+    lastLinkOkMs = millis();
+
+    // Dipublish sebelum subscribe supaya web secepat mungkin berhenti menampilkan
+    // "ESP mati" begitu perangkat benar-benar kembali.
+    publishDeviceOnline();
+
     mqttClient.subscribe(TOPIC_CMD);
     mqttClient.subscribe(TOPIC_CMD_RESET);
 
     clearStaleRetainedTopics();
+}
+
+void RelayOnlyMQTT::publishDeviceOnline() {
+    mqttClient.publish(TOPIC_DEVICE_STATUS, PAYLOAD_STATUS_ONLINE, STATUS_WILL_RETAIN);
+}
+
+void RelayOnlyMQTT::publishDeviceOffline() {
+    // Dipakai saat firmware sendiri yang memutuskan restart. Last Will tidak
+    // bisa diandalkan di jalur ini: bila koneksi ditutup rapi broker justru
+    // membuang will-nya, dan bila board langsung reboot web akan menunggu
+    // sepanjang keepalive sebelum tahu.
+    mqttClient.publish(TOPIC_DEVICE_STATUS, PAYLOAD_STATUS_OFFLINE, STATUS_WILL_RETAIN);
+    mqttClient.loop();
 }
 
 void RelayOnlyMQTT::clearStaleRetainedTopics() {
@@ -309,6 +432,7 @@ void RelayOnlyMQTT::handleRemoteReset(const String& payload) {
     char buf[192];
     serializeJson(ack, buf);
     mqttClient.publish(TOPIC_CMD_RESET_ACK, buf, false);
+    publishDeviceOffline();
     mqttClient.loop();  // flush ACK ke broker sebelum restart
 
     Serial.printf(
@@ -341,6 +465,24 @@ void RelayOnlyMQTT::publishRelayCommandAck(uint8_t relayIndex, const char* actio
     mqttClient.publish(TOPIC_CONFIG_ACK, buf, false);
 }
 
+void RelayOnlyMQTT::addClockFields(JsonDocument& doc) {
+    doc["uptime_ms"] = millis();
+
+    if (!rtcManager.isOk()) {
+        doc["rtc_time"] = nullptr;
+        return;
+    }
+
+    DateTime dt = rtcManager.now();
+    char timeBuf[20];
+    snprintf(
+        timeBuf, sizeof(timeBuf),
+        "%04u-%02u-%02u %02u:%02u:%02u",
+        dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
+    );
+    doc["rtc_time"] = timeBuf;
+}
+
 void RelayOnlyMQTT::publishRelayStatus() {
     JsonDocument doc;
     doc["device_id"] = MQTT_CLIENT_ID;
@@ -366,7 +508,12 @@ void RelayOnlyMQTT::publishRelayStatus() {
     if (relayManager.isOn(RELAY_PUMP_B))         active.add(7);
     if (relayManager.isOn(RELAY_PUMP_MIX))       active.add(8);
 
-    char buf[256];
+    addClockFields(doc);
+
+    // 256 hanya menyisakan 23 byte saat kedelapan relay menyala; menambah
+    // rtc_time membuatnya meluap dan serializeJson() memotong diam-diam
+    // sehingga web menerima JSON rusak.
+    char buf[384];
     serializeJson(doc, buf);
     mqttClient.publish(TOPIC_RELAY_STATUS, buf, true);
 }

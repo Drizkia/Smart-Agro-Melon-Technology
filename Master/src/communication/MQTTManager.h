@@ -17,6 +17,7 @@
 #include "../fsm/FertigationFSM.h"
 
 #include "MQTTConfig.h"
+#include "../utils/LinkWatchdog.h"
 
 // MQTT sekarang dipakai publish-only pada mode sistem penuh. Input FSM/command
 // diambil dari Master/data/FSMInputData.h sampai inbound web siap dipakai lagi.
@@ -51,8 +52,22 @@ public:
     bool isConnected();
 
 private:
+    // Sambungan WiFi awal via captive portal WiFiManager — blocking, hanya boleh
+    // dipanggil dari begin().
     void connectWiFi();
+
+    // Sambung ulang WiFi dari dalam loop: non-blocking dan di-throttle. Cacat
+    // yang sama seperti di RelayOnlyMQTT — update() dulu hanya `return` saat
+    // WiFi mati dan connectWiFi() cuma dipanggil sekali dari begin(), sehingga
+    // satu kali putus berarti offline sampai board dicabut-colok.
+    void maintainWiFi();
+
     void connectMQTT();
+
+    // Matikan relay bila link putus terlalu lama, lalu restart bila makin lama.
+    void applyLinkWatchdog(bool linkUp);
+
+    void publishDeviceOnline();
 
     void publishSensors(const SensorData& data);
     void publishConfigAck(const char* configName, bool success);
@@ -89,6 +104,12 @@ private:
     bool parseRelayIndex(const JsonDocument& doc, uint8_t& relayIndex) const;
     RelayChannel relayIndexToChannel(uint8_t relayIndex) const;
     void publishRelayCommandAck(uint8_t relayIndex, const char* action, bool success, const char* reason = nullptr);
+
+    // Terakhir kali WiFi + MQTT sama-sama hidup — acuan failsafe/restart.
+    uint32_t lastLinkOkMs = 0;
+    uint32_t wifiRetryAt  = RETRY_NEVER_ATTEMPTED;
+    uint32_t mqttRetryAt  = RETRY_NEVER_ATTEMPTED;
+    bool     failsafeApplied = false;
 
     unsigned long lastPublish = 0;
     unsigned long lastSoilPublish = 0;

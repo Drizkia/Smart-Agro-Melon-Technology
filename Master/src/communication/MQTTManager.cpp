@@ -35,15 +35,84 @@ void MQTTManager::begin() {
         WiFi.localIP().toString().c_str()
     );
 
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
+
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
 #if MQTT_RECEIVE_ENABLED
     mqttClient.setCallback(onMessage);
 #endif
     mqttClient.setBufferSize(1024);
 
+    // Acuan awal watchdog; tanpa ini boot yang gagal konek langsung dianggap
+    // "sudah lama putus" dan memicu restart beruntun.
+    lastLinkOkMs = millis();
+
     if (WiFi.status() == WL_CONNECTED) {
         connectMQTT();
     }
+}
+
+void MQTTManager::maintainWiFi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiRetryAt = RETRY_NEVER_ATTEMPTED;
+        return;
+    }
+
+    uint32_t now = millis();
+    if (!isRetryDue(wifiRetryAt, now, WIFI_RETRY_INTERVAL_MS)) {
+        return;
+    }
+    wifiRetryAt = now;
+
+    // Kredensial diambil dari NVS. WiFiManager sengaja tidak dipanggil di sini:
+    // captive portal-nya blocking sampai 180 detik dan akan membekukan FSM.
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+
+    Serial.printf(
+        "t=%010lu | WARN  | WIFI     | reconnect=dicoba status=%d interval=%lums\n",
+        millis(),
+        WiFi.status(),
+        WIFI_RETRY_INTERVAL_MS
+    );
+}
+
+void MQTTManager::applyLinkWatchdog(bool linkUp) {
+    uint32_t offlineMs = elapsedSince(lastLinkOkMs, millis());
+
+    switch (decideLinkAction(linkUp, offlineMs, LINK_FAILSAFE_MS, LINK_RESTART_MS)) {
+        case LINK_OK:
+        case LINK_DEGRADED:
+            return;
+
+        case LINK_FAILSAFE:
+            if (failsafeApplied) return;
+            failsafeApplied = true;
+            relayManager.allOff();
+            Serial.printf(
+                "t=%010lu | WARN  | FAILSAFE | link putus %lus - SEMUA RELAY DIMATIKAN\n",
+                millis(),
+                offlineMs / 1000UL
+            );
+            return;
+
+        case LINK_RESTART:
+            Serial.printf(
+                "t=%010lu | WARN  | FAILSAFE | link putus %lus - restart board\n",
+                millis(),
+                offlineMs / 1000UL
+            );
+            relayManager.allOff();
+            Serial.flush();
+            delay(100);
+            ESP.restart();
+            return;
+    }
+}
+
+void MQTTManager::publishDeviceOnline() {
+    mqttClient.publish(TOPIC_DEVICE_STATUS, PAYLOAD_STATUS_ONLINE, STATUS_WILL_RETAIN);
 }
 
 // =========================================
@@ -54,15 +123,21 @@ void MQTTManager::update(
     FertigationState fsmState,
     ErrorCode errorCode
 ) {
-    if (WiFi.status() != WL_CONNECTED) {
-        return;
-    }
+    maintainWiFi();
 
-    if (!mqttClient.connected()) {
+    if (WiFi.status() == WL_CONNECTED && !mqttClient.connected()) {
         connectMQTT();
     }
 
-    if (!mqttClient.connected()) {
+    bool linkUp = (WiFi.status() == WL_CONNECTED) && mqttClient.connected();
+    if (linkUp) {
+        lastLinkOkMs    = millis();
+        failsafeApplied = false;
+    }
+
+    applyLinkWatchdog(linkUp);
+
+    if (!linkUp) {
         return;
     }
 
@@ -578,12 +653,32 @@ void MQTTManager::connectMQTT() {
     if (mqttClient.connected()) return;
     if (WiFi.status() != WL_CONNECTED) return;
 
+    // connect() blocking sampai socket timeout (15 detik) bila broker tak bisa
+    // dihubungi; tanpa throttle, tiap iterasi loop() menggantung selama itu.
+    uint32_t now = millis();
+    if (!isRetryDue(mqttRetryAt, now, MQTT_RETRY_INTERVAL_MS)) {
+        return;
+    }
+    mqttRetryAt = now;
+
     wifiClient.setInsecure();
 
-    bool ok = mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS);
+    // Last Will: broker menerbitkan "offline" bila ESP hilang tanpa pamit.
+    bool ok = mqttClient.connect(
+        MQTT_CLIENT_ID,
+        MQTT_USER,
+        MQTT_PASS,
+        TOPIC_DEVICE_STATUS,
+        STATUS_WILL_QOS,
+        STATUS_WILL_RETAIN,
+        PAYLOAD_STATUS_OFFLINE
+    );
 
     if (ok) {
         Serial.printf("t=%010lu | INFO  | MQTT     | connected=true\n", millis());
+        mqttRetryAt  = RETRY_NEVER_ATTEMPTED;
+        lastLinkOkMs = millis();
+        publishDeviceOnline();
 #if MQTT_RECEIVE_ENABLED
         mqttClient.subscribe(TOPIC_CMD);
         mqttClient.subscribe(TOPIC_CFG_PPM);
@@ -737,6 +832,10 @@ void MQTTManager::handleRemoteReset(const String& payload) {
     char buf[192];
     serializeJson(ack, buf);
     mqttClient.publish(TOPIC_CMD_RESET_ACK, buf, false);
+    // Last Will tidak menolong di jalur ini: broker membuangnya saat koneksi
+    // ditutup rapi, dan bila board langsung reboot web menunggu sepanjang
+    // keepalive sebelum tahu. Jadi umumkan sendiri.
+    mqttClient.publish(TOPIC_DEVICE_STATUS, PAYLOAD_STATUS_OFFLINE, STATUS_WILL_RETAIN);
     mqttClient.loop();  // flush ACK ke broker sebelum restart
 
     Serial.printf(
